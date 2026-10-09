@@ -1,0 +1,21 @@
+{
+  "reservations": [
+    {
+      "id": "1",
+      "confirmation_number": "ABC123",
+      "passenger": {
+        "first_name": "JOHN",
+        "last_name": "DOE"
+      }
+    }
+  ],
+  "schedule": {
+    "checkin_time_str": "2026-10-15 14:00:00",
+    "timezone": "America/Chicago",
+    "lead_time_seconds": 0.0,
+    "poll_interval_seconds": 0.5,
+    "max_poll_seconds": 30.0,
+    "engine_type": "browser",
+    "headless": true
+  }
+}
