@@ -1,5 +1,6 @@
 """Southwest Airlines API Client, Simulation Engine, and Diagnostic Logging."""
 
+import asyncio
 import json
 import logging
 import random
@@ -128,6 +129,15 @@ class SouthwestClient:
                 message=f"[{timing_str}] Network/TLS error: {str(e)[:80]}",
                 raw_response_code=None,
             )
+
+    async def attempt_checkin_all(
+        self, reservations: List[Reservation], attempt_num: int, target_epoch: float, current_epoch: float
+    ) -> List[CheckInAttemptResult]:
+        """Dispatches check-in requests for all reservations concurrently in parallel threads."""
+        return await asyncio.gather(*(
+            asyncio.to_thread(self.attempt_checkin, r, attempt_num, target_epoch, current_epoch)
+            for r in reservations
+        ))
 
     def _parse_response(
         self,
@@ -301,3 +311,12 @@ class MockSouthwestClient:
             boarding_passes=boarding_passes,
             raw_response_code=200,
         )
+
+    async def attempt_checkin_all(
+        self, reservations: List[Reservation], attempt_num: int, target_epoch: float, current_epoch: float
+    ) -> List[CheckInAttemptResult]:
+        """Dispatches simulated check-in for all reservations concurrently in parallel threads."""
+        return await asyncio.gather(*(
+            asyncio.to_thread(self.attempt_checkin, r, attempt_num, target_epoch, current_epoch)
+            for r in reservations
+        ))

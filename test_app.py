@@ -1,5 +1,6 @@
 """Unit and integration tests for Southwest check-in application."""
 
+import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
 import time
@@ -56,28 +57,29 @@ def test_logging():
 
 def test_browser_client_initialization():
     print("Testing Playwright Stealth Browser client initialization...")
-    client = PlaywrightSouthwestClient(headless=True)
-    try:
-        client.start()
-        assert client.browser is not None
-        assert client.context is not None
-        print("✓ Playwright stealth browser successfully launched and context created")
-    finally:
-        client.close()
+    async def _test():
+        client = PlaywrightSouthwestClient(headless=True)
+        try:
+            await client.start()
+            assert client.browser is not None
+            assert client.context is not None
+            print("✓ Playwright stealth browser successfully launched and context created")
+        finally:
+            await client.close()
+
+    asyncio.run(_test())
 
 
-def test_scheduler_exact_time_and_half_second_interval():
-    # Target time is 1.5 seconds from now.
-    # Lead time = 0.0s (starts at exact check-in time).
-    # Poll interval = 0.5s.
+def test_parallel_multi_pnr_execution():
+    # Test checking in 3 reservations concurrently in parallel
+    print("Testing parallel check-in across multiple PNRs...")
     now = datetime.now(ZoneInfo("America/Chicago"))
-    target = now + timedelta(seconds=1.5)
+    target = now + timedelta(seconds=1.2)
     target_str = target.strftime("%Y-%m-%d %H:%M:%S")
 
-    r1 = Reservation(
-        confirmation_number="TESTA1",
-        passenger=Passenger(first_name="MARK", last_name="TWAIN"),
-    )
+    r1 = Reservation(confirmation_number="PARA01", passenger=Passenger(first_name="ALICE", last_name="SMITH"))
+    r2 = Reservation(confirmation_number="PARA02", passenger=Passenger(first_name="BOB", last_name="SMITH"))
+    r3 = Reservation(confirmation_number="PARA03", passenger=Passenger(first_name="CHARLIE", last_name="BROWN"))
 
     sched = CheckInSchedule(
         checkin_time_str=target_str,
@@ -88,23 +90,28 @@ def test_scheduler_exact_time_and_half_second_interval():
         engine_type="mock",
     )
 
-    timestamps = []
+    completed_attempts = []
 
     def on_attempt(result, res):
-        timestamps.append(result.timestamp)
-        print(f"  [Attempt {result.attempt_number}] {res.confirmation_number}: {result.status.value} - {result.message}")
+        completed_attempts.append((res.confirmation_number, result.attempt_number))
+        print(f"  [Parallel Attempt {result.attempt_number}] {res.confirmation_number}: {result.status.value} - {result.message}")
 
+    t_start = time.perf_counter()
     scheduler = CheckInScheduler(
-        reservations=[r1],
+        reservations=[r1, r2, r3],
         schedule=sched,
         engine_type="mock",
         on_attempt_result_callback=on_attempt,
     )
 
     results = scheduler.run()
+    t_elapsed = time.perf_counter() - t_start
 
-    assert all(r.status == CheckInStatus.SUCCESS for r in results)
-    print("✓ Scheduler exact-time (0.0s lead) and 0.5s interval test passed!")
+    assert all(r.status == CheckInStatus.SUCCESS for r in results), "All reservations should succeed in parallel"
+    assert len(r1.boarding_passes) > 0
+    assert len(r2.boarding_passes) > 0
+    assert len(r3.boarding_passes) > 0
+    print(f"✓ Parallel check-in of 3 PNRs completed successfully in {t_elapsed:.2f}s!")
 
 
 def test_past_checkin_immediate_execution():
@@ -118,6 +125,10 @@ def test_past_checkin_immediate_execution():
         confirmation_number="PAST01",
         passenger=Passenger(first_name="CARSON", last_name="MCDONALD"),
     )
+    r2 = Reservation(
+        confirmation_number="PAST02",
+        passenger=Passenger(first_name="CORBIN", last_name="MCDONALD"),
+    )
 
     sched = CheckInSchedule(
         checkin_time_str=past_target_str,
@@ -130,7 +141,7 @@ def test_past_checkin_immediate_execution():
 
     start_exec = time.time()
     scheduler = CheckInScheduler(
-        reservations=[r1],
+        reservations=[r1, r2],
         schedule=sched,
         engine_type="mock",
     )
@@ -139,9 +150,8 @@ def test_past_checkin_immediate_execution():
     elapsed = time.time() - start_exec
 
     assert all(r.status == CheckInStatus.SUCCESS for r in results)
-    # Must execute within 2 seconds (not waiting for past time or hanging)
     assert elapsed < 3.0, f"Immediate checkin took too long: {elapsed}s"
-    print(f"✓ Past check-in executed immediately and succeeded in {elapsed:.2f}s!")
+    print(f"✓ Past check-in of multiple PNRs executed immediately in parallel and succeeded in {elapsed:.2f}s!")
 
 
 if __name__ == "__main__":
@@ -149,6 +159,6 @@ if __name__ == "__main__":
     test_ntp()
     test_logging()
     test_browser_client_initialization()
-    test_scheduler_exact_time_and_half_second_interval()
+    test_parallel_multi_pnr_execution()
     test_past_checkin_immediate_execution()
     print("\nALL TESTS PASSED SUCCESSFULLY!")
