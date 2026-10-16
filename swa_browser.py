@@ -120,7 +120,7 @@ class PlaywrightSouthwestClient:
     async def attempt_checkin_single(
         self, reservation: Reservation, attempt_num: int, target_epoch: float, current_epoch: float
     ) -> CheckInAttemptResult:
-        """Executes a check-in submit click for a single reservation tab."""
+        """Executes a check-in submit click for a single reservation tab, handling the 2-step SWA flow."""
         diff_from_t = current_epoch - target_epoch
         timing_str = f"T{diff_from_t:+.2f}s"
         pnr = reservation.confirmation_number
@@ -137,39 +137,105 @@ class PlaywrightSouthwestClient:
             )
 
         try:
-            # Handle name variation with spaces (e.g. MC DONALD vs MCDONALD)
-            last_name_input = reservation.passenger.last_name
-            if " " in last_name_input:
-                if attempt_num % 2 == 0:
-                    chosen_last = last_name_input.replace(" ", "")
-                else:
-                    chosen_last = last_name_input
-                try:
-                    if await page.query_selector("#passengerLastName"):
-                        await page.fill("#passengerLastName", chosen_last, timeout=1200)
-                        logger.debug(f"[{timing_str}] Using surname variant '{chosen_last}' for PNR {pnr}")
-                except Exception:
-                    pass
+            current_url = page.url
 
-            logger.info(f"[{timing_str}] Submitting Check-In form in parallel for PNR {pnr} (Attempt {attempt_num})...")
+            # 1. Quick check: Is this tab ALREADY on the confirmation page?
+            if "confirmation" in current_url.lower():
+                boarding_passes = await self._extract_boarding_passes_from_dom_async(page, reservation)
+                summary = ", ".join([f"{bp.passenger_name}: {bp.position_str}" for bp in boarding_passes])
+                screenshot_path = await self._capture_debug_screenshot_async(reservation.id, pnr, "success_boarding_pass")
+                logger.info(
+                    f"[{timing_str}] Check-in ALREADY CONFIRMED for {pnr}! Boarding: {summary or 'Confirmed'}. "
+                    f"Screenshot: {screenshot_path}"
+                )
+                return CheckInAttemptResult(
+                    timestamp=current_epoch,
+                    attempt_number=attempt_num,
+                    reservation_id=reservation.id,
+                    status=CheckInStatus.SUCCESS,
+                    message=f"[{timing_str}] Check-in SUCCESS! Boarding: {summary or 'Confirmed'}",
+                    boarding_passes=boarding_passes,
+                    raw_response_code=200,
+                )
 
-            # Click submit button
-            submit_btn = await page.query_selector("#form-mixin--submit-button")
-            if submit_btn:
+            # 2. Check if page is already on the Review Step (Step 2 of Southwest flow)
+            review_btn = await page.query_selector(
+                ".air-check-in-review-results--check-in-button, button.submit-button, button:has-text('Check in')"
+            )
+            is_on_review = "review" in current_url.lower() or (review_btn and "index" not in current_url.lower())
+
+            if is_on_review and review_btn:
+                logger.info(f"[{timing_str}] Tab for PNR {pnr} is on Review page. Clicking Step 2 'Check in' button...")
                 try:
-                    await submit_btn.click(timeout=1500)
+                    await review_btn.click(timeout=3000)
                 except Exception:
                     await page.keyboard.press("Enter")
+
+                try:
+                    await page.wait_for_url("**/confirmation.html*", timeout=6000)
+                except Exception:
+                    await page.wait_for_timeout(1000)
+
+                current_url = page.url
+
             else:
-                await page.keyboard.press("Enter")
+                # 3. Retrieve Step (Step 1 of Southwest flow) on index.html
+                last_name_input = reservation.passenger.last_name
+                if " " in last_name_input:
+                    if attempt_num % 2 == 0:
+                        chosen_last = last_name_input.replace(" ", "")
+                    else:
+                        chosen_last = last_name_input
+                    try:
+                        if await page.query_selector("#passengerLastName"):
+                            await page.fill("#passengerLastName", chosen_last, timeout=1200)
+                            logger.debug(f"[{timing_str}] Using surname variant '{chosen_last}' for PNR {pnr}")
+                    except Exception:
+                        pass
 
-            # Wait briefly for DOM reaction / network transition
-            await page.wait_for_timeout(600)
+                logger.info(f"[{timing_str}] Submitting Check-In form in parallel for PNR {pnr} (Attempt {attempt_num})...")
 
-            current_url = page.url
-            logger.debug(f"[{timing_str}] Post-click URL for {pnr}: {current_url}")
+                submit_btn = await page.query_selector("#form-mixin--submit-button")
+                if submit_btn:
+                    try:
+                        await submit_btn.click(timeout=1500)
+                    except Exception:
+                        await page.keyboard.press("Enter")
+                else:
+                    await page.keyboard.press("Enter")
 
-            # 1. Check for Access Denied / 403 Bot Block
+                # Wait for URL transition to review.html or confirmation.html
+                try:
+                    await page.wait_for_url(
+                        lambda u: "review" in u.lower() or "confirmation" in u.lower(),
+                        timeout=3500,
+                    )
+                except Exception:
+                    await page.wait_for_timeout(600)
+
+                current_url = page.url
+                logger.debug(f"[{timing_str}] Post-retrieve URL for {pnr}: {current_url}")
+
+                # If retrieved into Review page, immediately click the Step 2 "Check in" button
+                if "review" in current_url.lower():
+                    logger.info(f"[{timing_str}] Reached Review page for {pnr}! Clicking Step 2 'Check in' button...")
+                    try:
+                        step2_btn = await page.wait_for_selector(
+                            ".air-check-in-review-results--check-in-button, button.submit-button, button:has-text('Check in')",
+                            timeout=3000,
+                        )
+                        if step2_btn:
+                            await step2_btn.click(timeout=3000)
+                            try:
+                                await page.wait_for_url("**/confirmation.html*", timeout=6000)
+                            except Exception:
+                                await page.wait_for_timeout(1000)
+                    except Exception as e:
+                        logger.warning(f"[{timing_str}] Step 2 review click encountered: {e}")
+
+                    current_url = page.url
+
+            # 4. Check for Access Denied / 403 Bot Block
             page_text = await page.inner_text("body")
             if "Access Denied" in page_text or "You don't have permission to access" in page_text:
                 screenshot_path = await self._capture_debug_screenshot_async(reservation.id, pnr, "access_denied")
@@ -183,10 +249,11 @@ class PlaywrightSouthwestClient:
                     raw_response_code=403,
                 )
 
-            # 2. Check for Check-in Confirmation / Success
+            # 5. Check for Check-in Confirmation / Success
             is_confirmation_page = (
                 "confirmation" in current_url.lower()
-                or (await page.query_selector(".boarding-pass-information, .passenger-boarding-info, [class*='boarding-group']"))
+                or "you're checked in" in page_text.lower()
+                or (await page.query_selector(".air-check-in-confirmation-results, .boarding-pass-information, .passenger-boarding-info"))
                 is not None
             )
 
@@ -208,7 +275,18 @@ class PlaywrightSouthwestClient:
                     raw_response_code=200,
                 )
 
-            # 3. Check for Errors & Banner Messages
+            # If still on Review page (e.g. click still processing), retry on next poll tick
+            if "review" in current_url.lower():
+                return CheckInAttemptResult(
+                    timestamp=current_epoch,
+                    attempt_number=attempt_num,
+                    reservation_id=reservation.id,
+                    status=CheckInStatus.TOO_EARLY,
+                    message=f"[{timing_str}] On Review page, submitting final check-in...",
+                    raw_response_code=200,
+                )
+
+            # 6. Check for Errors & Banner Messages on retrieval page
             error_elements = await page.query_selector_all(
                 '[class*="error"], [class*="alert"], [role="alert"], .form-mixin--error-message'
             )
@@ -289,10 +367,11 @@ class PlaywrightSouthwestClient:
         passes: List[BoardingPassInfo] = []
         try:
             text = await page.inner_text("body")
-            matches = re.findall(r"\b([ABC])\s*[-–]?\s*([0-5]?[0-9]|60)\b", text)
 
-            if matches:
-                for grp, pos in matches:
+            # 1. Traditional Southwest format (e.g. A24, B15, C05)
+            trad_matches = re.findall(r"\b([ABC])\s*[-–]?\s*([0-5]?[0-9]|60)\b", text)
+            if trad_matches:
+                for grp, pos in trad_matches:
                     passes.append(
                         BoardingPassInfo(
                             passenger_name=reservation.passenger.full_name,
@@ -300,18 +379,52 @@ class PlaywrightSouthwestClient:
                             boarding_position=pos,
                         )
                     )
+                return passes
+
+            # 2. Modern numeric boarding group & assigned seat format (e.g. Boarding group 3, Seat 12F)
+            group_match = re.search(r"boarding\s+group\s*[:\n]?\s*([0-9]+|[ABC])", text, re.IGNORECASE)
+            seat_match = re.search(r"(?:seat|position)\s*[:\n]?\s*([0-9]{1,2}[A-F]?|[0-5]?[0-9]|60)", text, re.IGNORECASE)
+
+            if not group_match or not seat_match:
+                # Columnar format: BOARDING GROUP ... SEAT ... 3 ... 12F
+                col_match = re.search(r"BOARDING GROUP\s+SEAT[\s\S]*?\n\s*([0-9]+|[ABC])\s+([0-9]{1,2}[A-F])", text)
+                if col_match:
+                    if not group_match:
+                        group_match = col_match
+                    if not seat_match:
+                        seat_match = col_match
+
+            grp = group_match.group(1) if group_match else None
+            pos = seat_match.group(1) if seat_match else None
+
+            if grp or pos:
+                passes.append(
+                    BoardingPassInfo(
+                        passenger_name=reservation.passenger.full_name,
+                        boarding_group=grp or "Confirmed",
+                        boarding_position=pos or "",
+                    )
+                )
             else:
                 passes.append(
                     BoardingPassInfo(
                         passenger_name=reservation.passenger.full_name,
-                        boarding_group="A",
-                        boarding_position="Confirmed",
+                        boarding_group="Confirmed",
+                        boarding_position="",
                     )
                 )
         except Exception as e:
             logger.error(f"Error parsing boarding pass from DOM: {e}")
+            passes.append(
+                BoardingPassInfo(
+                    passenger_name=reservation.passenger.full_name,
+                    boarding_group="Confirmed",
+                    boarding_position="",
+                )
+            )
 
         return passes
+
 
     async def _capture_debug_screenshot_async(self, res_id: str, pnr: str, prefix: str) -> str:
         """Captures a screenshot asynchronously for diagnostic troubleshooting."""

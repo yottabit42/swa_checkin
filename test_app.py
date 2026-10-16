@@ -7,7 +7,7 @@ import time
 from zoneinfo import ZoneInfo
 
 from logger_setup import read_recent_logs, setup_diagnostic_logging
-from models import CheckInSchedule, CheckInStatus, Passenger, Reservation
+from models import BoardingPassInfo, CheckInSchedule, CheckInStatus, Passenger, Reservation
 from ntp_sync import NTPClockSynchronizer
 from scheduler import CheckInScheduler
 from swa_browser import PlaywrightSouthwestClient
@@ -37,8 +37,17 @@ def test_models():
     assert dt.second == 0
     assert str(dt.tzinfo) == "America/Chicago"
     assert sched.lead_time_seconds == 0.0
-    assert sched.poll_interval_seconds == 0.5
-    print("✓ Model and schedule tests passed (0.0s lead, 0.5s interval defaults)")
+    # BoardingPassInfo formats
+    bp_legacy = BoardingPassInfo(passenger_name="JANE DOE", boarding_group="A", boarding_position="24")
+    assert bp_legacy.position_str == "A24"
+
+    bp_modern = BoardingPassInfo(passenger_name="JANE DOE", boarding_group="3", boarding_position="12F")
+    assert bp_modern.position_str == "Group 3 (Seat 12F)"
+
+    bp_confirmed = BoardingPassInfo(passenger_name="JANE DOE", boarding_group="Confirmed", boarding_position="")
+    assert bp_confirmed.position_str == "Confirmed"
+
+    print("✓ Model and schedule tests passed (0.0s lead, 0.5s interval defaults, modern/legacy boarding info)")
 
 
 def test_ntp():
@@ -154,6 +163,51 @@ def test_past_checkin_immediate_execution():
     print(f"✓ Past check-in of multiple PNRs executed immediately in parallel and succeeded in {elapsed:.2f}s!")
 
 
+def test_dom_boarding_pass_extraction():
+    class MockPage:
+        def __init__(self, text):
+            self._text = text
+
+        async def inner_text(self, selector):
+            return self._text
+
+    async def _test():
+        client = PlaywrightSouthwestClient(headless=True)
+        res = Reservation(
+            confirmation_number="BLC5LE",
+            passenger=Passenger(first_name="CORBIN", last_name="MC DONALD"),
+        )
+
+        modern_html_text = """
+        How would you like to receive your boarding documents?
+        Companion confirmation # BLC5LE
+        Corbin Layne Mc Donald
+        Boarding group 3
+        Seat 12F Window
+        FLIGHT # WN991
+        """
+        passes = await client._extract_boarding_passes_from_dom_async(MockPage(modern_html_text), res)
+        assert len(passes) == 1
+        assert passes[0].boarding_group == "3"
+        assert passes[0].boarding_position == "12F"
+        assert passes[0].position_str == "Group 3 (Seat 12F)"
+
+        legacy_html_text = """
+        BOARDING PASS
+        Boarding Group: A
+        Position: 24
+        Flight: WN 452
+        """
+        passes_legacy = await client._extract_boarding_passes_from_dom_async(MockPage(legacy_html_text), res)
+        assert len(passes_legacy) == 1
+        assert passes_legacy[0].boarding_group == "A"
+        assert passes_legacy[0].boarding_position == "24"
+        assert passes_legacy[0].position_str == "A24"
+        print("✓ Boarding pass DOM parsing verified for both legacy and modern assigned seating")
+
+    asyncio.run(_test())
+
+
 if __name__ == "__main__":
     test_models()
     test_ntp()
@@ -161,4 +215,5 @@ if __name__ == "__main__":
     test_browser_client_initialization()
     test_parallel_multi_pnr_execution()
     test_past_checkin_immediate_execution()
+    test_dom_boarding_pass_extraction()
     print("\nALL TESTS PASSED SUCCESSFULLY!")

@@ -52,8 +52,16 @@ class BoardingPassInfo(BaseModel):
     @property
     def position_str(self) -> str:
         if self.boarding_group and self.boarding_position:
+            if self.boarding_group.isdigit() or len(self.boarding_group) > 1:
+                return f"Group {self.boarding_group} (Seat {self.boarding_position})"
             return f"{self.boarding_group}{self.boarding_position}"
-        return "N/A"
+        elif self.boarding_group:
+            if self.boarding_group.isdigit():
+                return f"Group {self.boarding_group}"
+            return self.boarding_group
+        elif self.boarding_position:
+            return f"Seat {self.boarding_position}"
+        return "Confirmed"
 
 
 class Reservation(BaseModel):
