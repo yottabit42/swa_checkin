@@ -10,7 +10,7 @@ An automated check-in engine for Southwest Airlines flights featuring **Stealth 
 - **Exact-Time Check-In Trigger ($T$):** Pre-loads tabs and form fields ahead of time, then triggers the first submit click at the **exact second of check-in ($T$)**.
 - **0.5-Second Cadence / Immediate Retry:** Retries every **0.5 seconds** (500ms), or **immediately after the current attempt finishes** if network/page latency takes longer than 0.5s.
 - **Immediate Execution for Past Check-In Times:** If you start the tool after the check-in time has already passed, it skips the countdown and executes check-in attempts immediately for the duration of your configured polling window.
-- **Comprehensive Diagnostic Logging:** Automatically records all network transactions, headers, status codes, DOM error banners, and execution timings to [`checkin_debug.log`](file:///workspace/swa_checkin/checkin_debug.log).
+- **Comprehensive Diagnostic Logging:** Automatically records all network transactions, headers, status codes, DOM error banners, and execution timings to [`checkin_debug.log`](file:///root/workspaces/swa_checkin/checkin_debug.log).
 - **Multi-Passenger & Multi-Reservation Support:** Enter multiple confirmation numbers (PNR) and passenger names (First Name + Surname).
 - **Unified Check-In Time & Timezone:** Configure a single check-in time in **24-hour format** (`YYYY-MM-DD HH:MM:SS` or `YYYY-MM-DD HH:MM`) with IANA time zones (e.g., `America/Chicago`, `America/New_York`, `America/Los_Angeles`).
 - **NTP Atomic Time Synchronization:** Queries public NTP servers (`time.google.com`, `pool.ntp.org`, `time.cloudflare.com`) to eliminate local computer clock drift down to milliseconds.
@@ -62,7 +62,7 @@ python3 main.py
 
 ## Diagnosing Issues
 
-All actions and errors are logged to [`checkin_debug.log`](file:///workspace/swa_checkin/checkin_debug.log). You can view the last 40 lines directly inside the application via **Menu Option [7]**, or in a terminal with:
+All actions and errors are logged to [`checkin_debug.log`](file:///root/workspaces/swa_checkin/checkin_debug.log). You can view the last 40 lines directly inside the application via **Menu Option [7]**, or in a terminal with:
 ```bash
 tail -f checkin_debug.log
 ```
