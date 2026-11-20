@@ -98,89 +98,103 @@ class CheckInScheduler:
             f"Interval: {poll_interval}s"
         )
 
-        # 2. Stage 1 & 2: Countdown & Parallel Pre-loading (Only if not immediate)
-        if not is_immediate:
-            prepare_epoch = target_epoch - 20.0
-            while not self._cancelled:
-                now_atomic = self.clock.get_atomic_time()
-                time_left_to_start = start_epoch - now_atomic
-
-                if now_atomic >= prepare_epoch:
-                    break
-
+        try:
+            # 1b. Pre-flight browser verification BEFORE countdown starts so missing
+            # binaries are caught & auto-installed immediately rather than at T-20s.
+            if not is_immediate and hasattr(self.client, "ensure_browser_ready"):
                 if self.on_tick_callback:
                     self.on_tick_callback({
-                        "phase": "COUNTDOWN",
-                        "seconds_remaining": time_left_to_start,
+                        "phase": "PREFLIGHT_CHECK",
+                        "seconds_remaining": max(0.0, start_epoch - self.clock.get_atomic_time()),
                         "target_epoch": target_epoch,
-                        "current_atomic": now_atomic,
+                        "current_atomic": self.clock.get_atomic_time(),
                         "clock_skew": self.clock.offset,
                         "engine": self.engine_type,
                     })
+                preflight = self.client.ensure_browser_ready()
+                if inspect.isawaitable(preflight):
+                    await preflight
 
-                sleep_time = min(1.0, max(0.1, prepare_epoch - now_atomic))
-                await asyncio.sleep(sleep_time)
+            # 2. Stage 1 & 2: Countdown & Parallel Pre-loading (Only if not immediate)
+            if not is_immediate:
+                prepare_epoch = target_epoch - 20.0
+                while not self._cancelled:
+                    now_atomic = self.clock.get_atomic_time()
+                    time_left_to_start = start_epoch - now_atomic
+
+                    if now_atomic >= prepare_epoch:
+                        break
+
+                    if self.on_tick_callback:
+                        self.on_tick_callback({
+                            "phase": "COUNTDOWN",
+                            "seconds_remaining": time_left_to_start,
+                            "target_epoch": target_epoch,
+                            "current_atomic": now_atomic,
+                            "clock_skew": self.clock.offset,
+                            "engine": self.engine_type,
+                        })
+
+                    sleep_time = min(1.0, max(0.1, prepare_epoch - now_atomic))
+                    await asyncio.sleep(sleep_time)
+
+                if self._cancelled:
+                    return self.reservations
+
+                # Re-sync clock at armed window
+                self.clock.sync()
+
+            # Pre-load browser tabs in parallel
+            if hasattr(self.client, "prepare_reservations"):
+                if self.on_tick_callback:
+                    self.on_tick_callback({
+                        "phase": "PREPARING_BROWSER",
+                        "seconds_remaining": max(0.0, start_epoch - self.clock.get_atomic_time()),
+                        "target_epoch": target_epoch,
+                        "current_atomic": self.clock.get_atomic_time(),
+                        "clock_skew": self.clock.offset,
+                        "engine": self.engine_type,
+                    })
+                res = self.client.prepare_reservations(self.reservations)
+                if inspect.isawaitable(res):
+                    await res
+
+            # High-precision approach to start_epoch (Exact Time T)
+            if not is_immediate:
+                while not self._cancelled:
+                    now_atomic = self.clock.get_atomic_time()
+                    time_to_start = start_epoch - now_atomic
+
+                    if time_to_start <= 0.0:
+                        break
+
+                    if self.on_tick_callback:
+                        self.on_tick_callback({
+                            "phase": "ARMED",
+                            "seconds_remaining": time_to_start,
+                            "target_epoch": target_epoch,
+                            "current_atomic": now_atomic,
+                            "clock_skew": self.clock.offset,
+                            "engine": self.engine_type,
+                        })
+
+                    if time_to_start > 0.05:
+                        await asyncio.sleep(min(0.05, time_to_start - 0.02))
+                    else:
+                        await asyncio.sleep(0.001)
 
             if self._cancelled:
-                await self._safe_close_client()
                 return self.reservations
 
-            # Re-sync clock at armed window
-            self.clock.sync()
+            # 3. Stage 3: Active Parallel Polling Loop
+            attempt_number = 0
+            pending_reservations = [r for r in self.reservations if r.status != CheckInStatus.SUCCESS]
 
-        # Pre-load browser tabs in parallel
-        if hasattr(self.client, "prepare_reservations"):
-            if self.on_tick_callback:
-                self.on_tick_callback({
-                    "phase": "PREPARING_BROWSER",
-                    "seconds_remaining": max(0.0, start_epoch - self.clock.get_atomic_time()),
-                    "target_epoch": target_epoch,
-                    "current_atomic": self.clock.get_atomic_time(),
-                    "clock_skew": self.clock.offset,
-                    "engine": self.engine_type,
-                })
-            res = self.client.prepare_reservations(self.reservations)
-            if inspect.isawaitable(res):
-                await res
+            for r in pending_reservations:
+                r.status = CheckInStatus.POLLING
 
-        # High-precision approach to start_epoch (Exact Time T)
-        if not is_immediate:
-            while not self._cancelled:
-                now_atomic = self.clock.get_atomic_time()
-                time_to_start = start_epoch - now_atomic
+            logger.info(f"Triggering parallel polling loop for {len(pending_reservations)} reservation(s)...")
 
-                if time_to_start <= 0.0:
-                    break
-
-                if self.on_tick_callback:
-                    self.on_tick_callback({
-                        "phase": "ARMED",
-                        "seconds_remaining": time_to_start,
-                        "target_epoch": target_epoch,
-                        "current_atomic": now_atomic,
-                        "clock_skew": self.clock.offset,
-                        "engine": self.engine_type,
-                    })
-
-                if time_to_start > 0.05:
-                    await asyncio.sleep(min(0.05, time_to_start - 0.02))
-                else:
-                    await asyncio.sleep(0.001)
-
-        if self._cancelled:
-            await self._safe_close_client()
-            return self.reservations
-
-        # 3. Stage 3: Active Parallel Polling Loop
-        attempt_number = 0
-        pending_reservations = [r for r in self.reservations if r.status != CheckInStatus.SUCCESS]
-
-        for r in pending_reservations:
-            r.status = CheckInStatus.POLLING
-
-        logger.info(f"Triggering parallel polling loop for {len(pending_reservations)} reservation(s)...")
-
-        try:
             while pending_reservations and not self._cancelled:
                 attempt_number += 1
                 tick_start_atomic = self.clock.get_atomic_time()

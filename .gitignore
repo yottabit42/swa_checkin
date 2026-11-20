@@ -3,10 +3,11 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Virtual environments
+# Virtual environments & local browser binaries
 .venv/
 venv/
 ENV/
+.playwright-browsers/
 
 # Private reservation data, logs, and screenshots
 reservations.json

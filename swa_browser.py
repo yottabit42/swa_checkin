@@ -3,10 +3,19 @@
 import asyncio
 from datetime import datetime
 import logging
+import os
 from pathlib import Path
 import re
+import subprocess
+import sys
 import time
 from typing import Dict, List, Optional
+
+# Persist Playwright browser binaries inside the workspace directory by default
+# so container/system cache resets or Playwright updates do not remove them.
+LOCAL_BROWSERS_DIR = Path(__file__).resolve().parent / ".playwright-browsers"
+if not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(LOCAL_BROWSERS_DIR)
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
@@ -20,6 +29,40 @@ DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
+LAUNCH_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-infobars",
+    "--window-size=1280,800",
+]
+
+
+def _install_chromium_sync() -> None:
+    """Installs Playwright's Chromium binary into PLAYWRIGHT_BROWSERS_PATH."""
+    browsers_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", str(LOCAL_BROWSERS_DIR))
+    logger.warning(
+        f"Playwright Chromium binary missing; auto-installing into {browsers_path}..."
+    )
+    env = os.environ.copy()
+    env["PLAYWRIGHT_BROWSERS_PATH"] = browsers_path
+    result = subprocess.run(
+        [sys.executable, "-m", "playwright", "install", "chromium"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Automatic 'playwright install chromium' failed (exit {result.returncode}): "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+    logger.info("Playwright Chromium binary installed successfully.")
+
+
+def _is_missing_browser_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "executable doesn't exist" in msg or "playwright install" in msg
 
 
 class PlaywrightSouthwestClient:
@@ -33,35 +76,48 @@ class PlaywrightSouthwestClient:
         self.context: Optional[BrowserContext] = None
         self.pages: Dict[str, Page] = {}  # reservation.id -> Page
 
-    async def start(self):
+    async def ensure_browser_ready(self, auto_install: bool = True) -> None:
+        """Pre-flight check verifying Chromium launches cleanly before any countdown begins."""
+        logger.info(
+            f"Running pre-flight browser check (PLAYWRIGHT_BROWSERS_PATH={os.environ.get('PLAYWRIGHT_BROWSERS_PATH')})..."
+        )
+        await self.start(auto_install=auto_install)
+        await self.close()
+        logger.info("Pre-flight browser check passed.")
+
+    async def start(self, auto_install: bool = True):
         """Initializes the Playwright Chromium instance with stealth flags."""
         if self.browser:
             return
 
         logger.info(f"Launching Async Playwright Chromium (headless={self.headless})...")
-        self.playwright = await async_playwright().start()
+        try:
+            self.playwright = await async_playwright().start()
+            try:
+                self.browser = await self.playwright.chromium.launch(
+                    headless=self.headless,
+                    args=LAUNCH_ARGS,
+                )
+            except Exception as e:
+                if auto_install and _is_missing_browser_error(e):
+                    await asyncio.to_thread(_install_chromium_sync)
+                    self.browser = await self.playwright.chromium.launch(
+                        headless=self.headless,
+                        args=LAUNCH_ARGS,
+                    )
+                else:
+                    raise
 
-        launch_args = [
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-infobars",
-            "--window-size=1280,800",
-        ]
-
-        self.browser = await self.playwright.chromium.launch(
-            headless=self.headless,
-            args=launch_args,
-        )
-
-        self.context = await self.browser.new_context(
-            user_agent=DEFAULT_USER_AGENT,
-            viewport={"width": 1280, "height": 800},
-            locale="en-US",
-            timezone_id="America/Chicago",
-        )
-
-        logger.info("Playwright browser instance initialized successfully.")
+            self.context = await self.browser.new_context(
+                user_agent=DEFAULT_USER_AGENT,
+                viewport={"width": 1280, "height": 800},
+                locale="en-US",
+                timezone_id="America/Chicago",
+            )
+            logger.info("Playwright browser instance initialized successfully.")
+        except Exception:
+            await self.close()
+            raise
 
     async def _prepare_single_reservation(self, res: Reservation) -> bool:
         """Opens a tab and pre-fills form fields for a single reservation."""
@@ -444,17 +500,29 @@ class PlaywrightSouthwestClient:
     async def close(self):
         """Closes all browser pages, context, and the Playwright engine."""
         try:
-            for page in self.pages.values():
+            for page in list(self.pages.values()):
                 if not page.is_closed():
-                    await page.close()
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
             self.pages.clear()
 
             if self.context:
-                await self.context.close()
+                try:
+                    await self.context.close()
+                finally:
+                    self.context = None
             if self.browser:
-                await self.browser.close()
+                try:
+                    await self.browser.close()
+                finally:
+                    self.browser = None
             if self.playwright:
-                await self.playwright.stop()
+                try:
+                    await self.playwright.stop()
+                finally:
+                    self.playwright = None
             logger.info("Playwright browser session closed cleanly.")
         except Exception as e:
             logger.error(f"Error during browser teardown: {e}")

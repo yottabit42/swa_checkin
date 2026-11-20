@@ -65,16 +65,23 @@ def test_logging():
 
 
 def test_browser_client_initialization():
-    print("Testing Playwright Stealth Browser client initialization...")
+    print("Testing Playwright Stealth Browser client initialization & pre-flight...")
     async def _test():
         client = PlaywrightSouthwestClient(headless=True)
+        await client.ensure_browser_ready()
+        assert client.browser is None
+        assert client.context is None
+        assert client.playwright is None
+
         try:
             await client.start()
             assert client.browser is not None
             assert client.context is not None
-            print("✓ Playwright stealth browser successfully launched and context created")
+            print("✓ Playwright stealth browser pre-flight & launch verified")
         finally:
             await client.close()
+            assert client.browser is None
+            assert client.playwright is None
 
     asyncio.run(_test())
 
